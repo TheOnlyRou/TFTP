@@ -2,6 +2,7 @@
 import sys
 import os
 import enum
+import socket
 
 
 class TftpProcessor(object):
@@ -29,6 +30,19 @@ class TftpProcessor(object):
     think they are "private" only. Private functions in Python
     start with an "_", check the example below
     """
+    data_stream = []
+    num_packets = 0
+    data_buffer = []
+    error_messages = {
+        0: "Not defined, see error message (if any).",
+        1: "File not found.",
+        2: "Access violation.",
+        3: "Disk full or allocation exceeded.",
+        4: "Illegal TFTP operation.",
+        5: "Unknown transfer ID.",
+        6: "File already exists.",
+        7: "No such user."
+    }
 
     class TftpPacketType(enum.Enum):
         """
@@ -36,6 +50,10 @@ class TftpProcessor(object):
         modify the existing values as necessary.
         """
         RRQ = 1
+        WRQ = 2
+        DATA = 3
+        ACK = 4
+        ERROR = 5
 
     def __init__(self):
         """
@@ -63,18 +81,30 @@ class TftpProcessor(object):
         # This shouldn't change.
         self.packet_buffer.append(out_packet)
 
+        return in_packet
+
     def _parse_udp_packet(self, packet_bytes):
         """
         You'll use the struct module here to determine
         the type of the packet and extract other available
         information.
         """
-        pass
+        opcode = packet_bytes[:2]
+        if opcode == 5:
+            reply = self.error_messages[int.from_bytes(packet_bytes[2:4], 'big')]
+            print(reply)
+        elif opcode == 4:
+            reply = "ACK"
+        else:
+            reply = "UNK"
+        return reply
 
-    def _do_some_logic(self, input_packet):
+    def _do_some_logic(self, packet):
         """
         Example of a private function that does some logic.
         """
+
+
         pass
 
     def get_next_output_packet(self):
@@ -88,7 +118,8 @@ class TftpProcessor(object):
 
         Leave this function as is.
         """
-        return self.packet_buffer.pop(0)
+        if self.num_packets != 0:
+            return self.packet_buffer.pop(0)
 
     def has_pending_packets_to_be_sent(self):
         """
@@ -96,7 +127,7 @@ class TftpProcessor(object):
 
         Leave this function as is.
         """
-        return len(self.packet_buffer) != 0
+        return self.num_packets != 0
 
     def request_file(self, file_path_on_server):
         """
@@ -106,9 +137,19 @@ class TftpProcessor(object):
         accept is the file name. Remove this function if you're
         implementing a server.
         """
-        pass
+        # Create a RRQ
+        packet = bytearray()
+        packet.append(0)
+        packet.append(1)
+        name_barr = bytearray(file_path_on_server.encode('ascii'))
+        packet += name_barr
+        packet.append(0)
+        mode = bytearray("octet".encode('ascii'))
+        packet += mode
+        packet.append(0)
+        return packet
 
-    def upload_file(self, file_path_on_server):
+    def upload_file(self, filename):
         """
         This method is only valid if you're implementing
         a TFTP client, since the client requests or uploads
@@ -116,7 +157,31 @@ class TftpProcessor(object):
         accept is the file name. Remove this function if you're
         implementing a server.
         """
-        pass
+        # Convert file to bytearray
+        file = open(filename, "r")
+        data = file.read()
+        self.data_stream = data.encode("ascii")
+
+        start = 0
+        if len(self.data_stream % 512)!=0:
+            while len(self.data_stream % 512) != 0:
+                self.data_stream += b"0"
+        while self.data_stream:
+            self.data_buffer.append(self.data_stream[start: start + 511])
+            start += 512
+            self.num_packets += 1
+
+        # Create a WRQ
+        packet = bytearray()
+        packet.append(0)
+        packet.append(2)
+        name_barr = bytearray(filename.encode('ascii'))
+        packet += name_barr
+        packet.append(0)
+        mode = bytearray("octet".encode('ascii'))
+        packet += mode
+        packet.append(0)
+        return packet
 
 
 def check_file_name():
@@ -135,7 +200,8 @@ def setup_sockets(address):
 
     Feel free to delete this function.
     """
-    pass
+    udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    return udp_sock
 
 
 def do_socket_logic():
@@ -188,6 +254,7 @@ def main():
      Write your code above this function.
     if you need the command line arguments
     """
+
     print("*" * 50)
     print("[LOG] Printing command line arguments\n", ",".join(sys.argv))
     check_file_name()
@@ -201,6 +268,33 @@ def main():
     ip_address = get_arg(1, "127.0.0.1")
     operation = get_arg(2, "pull")
     file_name = get_arg(3, "test.txt")
+    port = 69
+
+    udp_socket = setup_sockets(ip_address)
+    tftp_proc = TftpProcessor()
+    if operation is "push":
+        packet = tftp_proc.upload_file(file_name)
+    elif operation is "pull":
+        packet = tftp_proc.request_file(file_name)
+    udp_socket.sendto(packet, (ip_address, port))
+    inc_packet, server = udp_socket.recvfrom(1000)
+    reply = tftp_proc.process_udp_packet(packet)
+    if reply == 0:
+        print("Connection Established")
+    else:
+        print("Error: Couldn't establish connection")
+    while True:
+        # Receive an acknowledgement packet or an error packet
+        if tftp_proc.has_pending_packets_to_be_sent() != 0:
+            if operation is "push":
+                sen_packet = tftp_proc.get_next_output_packet()
+            elif operation is "pull":
+                sen_packet = tftp_proc.get_next_output_packet()
+            rec_packet, server = udp_socket.recvfrom(1000)
+            reply = tftp_proc.process_udp_packet(packet)
+            if reply == 0:
+                print("Packet")
+                continue
 
     # Modify this as needed.
     parse_user_input(ip_address, operation, file_name)
