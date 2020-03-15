@@ -32,6 +32,7 @@ class TftpProcessor(object):
     """
     data_stream = []
     num_packets = 0
+    block_number = 1
     data_buffer = []
     error_messages = {
         0: "Not defined, see error message (if any).",
@@ -103,9 +104,14 @@ class TftpProcessor(object):
         """
         Example of a private function that does some logic.
         """
-
-
-        pass
+        ret_packet = bytearray()
+        ret_packet.append(0)
+        ret_packet.append(3)
+        ret_packet.append(self.block_number)
+        self.block_number += 1
+        ret_packet += self.data_buffer[0]
+        del[self.data_buffer]
+        return ret_packet
 
     def get_next_output_packet(self):
         """
@@ -119,7 +125,9 @@ class TftpProcessor(object):
         Leave this function as is.
         """
         if self.num_packets != 0:
-            return self.packet_buffer.pop(0)
+            packet = self._do_some_logic(self.data_buffer[0])
+            self.num_packets -= 1
+            return packet
 
     def has_pending_packets_to_be_sent(self):
         """
@@ -162,8 +170,9 @@ class TftpProcessor(object):
         data = file.read()
         self.data_stream = data.encode("ascii")
 
+        # Create the data buffer and fill it with 512 sized blocks of data
         start = 0
-        if len(self.data_stream % 512)!=0:
+        if len(self.data_stream % 512) != 0:
             while len(self.data_stream % 512) != 0:
                 self.data_stream += b"0"
         while self.data_stream:
@@ -270,34 +279,36 @@ def main():
     file_name = get_arg(3, "test.txt")
     port = 69
 
+    # Modify this as needed.
+    parse_user_input(ip_address, operation, file_name)
+
     udp_socket = setup_sockets(ip_address)
     tftp_proc = TftpProcessor()
+    packet = []
     if operation is "push":
         packet = tftp_proc.upload_file(file_name)
     elif operation is "pull":
         packet = tftp_proc.request_file(file_name)
+    # Send a WRQ or RRQ to the Server IP address on port 69
     udp_socket.sendto(packet, (ip_address, port))
-    inc_packet, server = udp_socket.recvfrom(1000)
-    reply = tftp_proc.process_udp_packet(packet)
+    # Acquire an acknowledgement packet, the host address and the upload port
+    inc_packet,  (host, new_port) = udp_socket.recvfrom(1000)
+    # Determine if received packet was ACK or ERROR
+    reply = tftp_proc.process_udp_packet(inc_packet)
     if reply == 0:
         print("Connection Established")
+        while True:
+            if tftp_proc.has_pending_packets_to_be_sent() != 0:
+                if operation is "push":
+                    # Acquire and the next TFTP packet to be sent
+                    sen_packet = tftp_proc.get_next_output_packet()
+                    udp_socket.sendto(sen_packet, (ip_address, new_port))
+                    inc_packet, server = udp_socket.recvfrom(1000)
+                    reply = tftp_proc.process_udp_packet(inc_packet)
+                    if reply is not "ACK":
+                        break
     else:
         print("Error: Couldn't establish connection")
-    while True:
-        # Receive an acknowledgement packet or an error packet
-        if tftp_proc.has_pending_packets_to_be_sent() != 0:
-            if operation is "push":
-                sen_packet = tftp_proc.get_next_output_packet()
-            elif operation is "pull":
-                sen_packet = tftp_proc.get_next_output_packet()
-            rec_packet, server = udp_socket.recvfrom(1000)
-            reply = tftp_proc.process_udp_packet(packet)
-            if reply == 0:
-                print("Packet")
-                continue
-
-    # Modify this as needed.
-    parse_user_input(ip_address, operation, file_name)
 
 
 if __name__ == "__main__":
