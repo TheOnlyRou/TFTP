@@ -31,12 +31,11 @@ class TftpProcessor(object):
     think they are "private" only. Private functions in Python
     start with an "_", check the example below
     """
-    data_stream = []
     num_packets = 0
     block_number = 1
     data_buffer = []
     reserve_packet = []
-    downloaded_file = []
+    downloaded_file = bytearray()
     error_messages = {
         0: "Not defined, see error message (if any).",
         1: "File not found.",
@@ -80,6 +79,7 @@ class TftpProcessor(object):
         # feel free to remove this line
         print(f"Received a packet from {packet_source}")
         reply = self._parse_udp_packet(packet_data)
+        # Add downloaded data packet to file, if the received packet is DATA
         if reply == "DATA":
             data_packet = packet_data[4:]
             self.downloaded_file += data_packet
@@ -88,13 +88,12 @@ class TftpProcessor(object):
         return reply
 
     def get_block_number(self, packet_data):
-        block_byte = packet_data[2:4]
-        block_num = block_byte.decode('ascii', 'strict')
-        return block_num
+        return packet_data[2:4]
 
     def decode_dload_file(self):
         file_content = self.downloaded_file.decode('ascii', 'strict')
-        f = open("output.ext", "w+")
+        filename = input("Please enter output file name (with extension)\n")
+        f = open(filename, "w+")
         f.write(file_content)
         f.close()
 
@@ -105,25 +104,36 @@ class TftpProcessor(object):
         information.
         """
         opcode = packet_bytes[:2]
-        if opcode == 5:
+
+        operation = int.from_bytes(opcode, 'big')
+        print("OPcode: ", operation)
+        print("Block#: ", int.from_bytes(packet_bytes[2:4], 'big'))
+        if operation == 5:
             error_msg = self.error_messages[int.from_bytes(packet_bytes[2:4], 'big')]
             reply = "ERROR"
             print(error_msg)
-        elif opcode == 3:
+        elif operation == 3:
             reply = "DATA"
-        elif opcode == 4:
+        elif operation == 4:
             reply = "ACK"
         else:
             reply = "UNK"
         return reply
 
-    def _do_some_logic(self, packet):
+    def _do_some_logic(self):
         """
         Example of a private function that does some logic.
         """
+        # Returns a TFTP DATA packet using
+        # OPCODE 03 (in 2 bytes)
+        # BLOCK NUM (in 2 bytes)
+        # DATA      (in MAX(512) bytes)
+
         ret_packet = bytearray()
         ret_packet.append(0)
         ret_packet.append(3)
+        if self.block_number <= 256:
+            ret_packet.append(0)
         ret_packet.append(self.block_number)
         self.block_number += 1
         ret_packet += self.data_buffer[0]
@@ -132,6 +142,9 @@ class TftpProcessor(object):
         return ret_packet
 
     def get_reserve_packet(self):
+        # In case a packet was not sent, the program calls this method to return it
+        # So it could be sent again
+
         return self.reserve_packet
 
     def get_next_output_packet(self):
@@ -145,8 +158,9 @@ class TftpProcessor(object):
 
         Leave this function as is.
         """
+
         if self.num_packets != 0:
-            packet = self._do_some_logic(self.data_buffer[0])
+            packet = self._do_some_logic()
             self.num_packets -= 1
             return packet
 
@@ -187,18 +201,19 @@ class TftpProcessor(object):
         implementing a server.
         """
         # Convert file to bytearray
-        file = open(filename, "rb")
+        try:
+            file = open(filename, "rb")
+        except IOError:
+            print("Your file doesn't exist")
+            exit(12)
         data = file.read()
-        self.data_stream = data
-
-        # Create the data buffer and fill it with 512 sized blocks of data
-        start = 0
-        if len(self.data_stream % 512) != 0:
-            while len(self.data_stream % 512) != 0:
-                self.data_stream += b"0"
-        while self.data_stream:
-            self.data_buffer.append(self.data_stream[start: start + 511])
-            start += 512
+        contents = bytearray()
+        contents.extend(data)
+        # Create the data buffer and fill it with 512 B sized blocks of data from the file content
+        offset = 0
+        while offset < len(contents):
+            self.data_buffer.append(contents[offset: offset + 512])
+            offset += 513
             self.num_packets += 1
 
         # Create a WRQ
@@ -211,6 +226,7 @@ class TftpProcessor(object):
         mode = bytearray("octet".encode('ascii'))
         packet += mode
         packet.append(0)
+
         return packet
 
 
@@ -296,36 +312,35 @@ def main():
     # The IP of the server, some default values
     # are provided. Feel free to modify them.
     ip_address = get_arg(1, "127.0.0.1")
-    operation = get_arg(2, "pull")
+    operation = get_arg(2, "push")
     file_name = get_arg(3, "test.txt")
     port = 69
 
     # Modify this as needed.
     parse_user_input(ip_address, operation, file_name)
-
     udp_socket = setup_sockets(ip_address)
     tftp_proc = TftpProcessor()
     packet = []
+    reply = ''
     if operation == "push":
         packet = tftp_proc.upload_file(file_name)
     elif operation == "pull":
         packet = tftp_proc.request_file(file_name)
     # Send a WRQ or RRQ to the Server IP address on port 69
     udp_socket.sendto(packet, (ip_address, port))
+    if operation == "push":
+        inc_packet, (host, new_port) = udp_socket.recvfrom(1000)
+        reply = tftp_proc.process_udp_packet(inc_packet, ip_address)
     # Acquire an acknowledgement packet, the host address and the upload port
-    num_tries1 = 0
-    inc_packet,  (host, new_port) = udp_socket.recvfrom(1000)
-    reply = tftp_proc.process_udp_packet(inc_packet, ip_address)
-
     # Determine if received packet was ACK or ERROR
-
-    if reply == 0:
+    if reply == "ACK":
         print("Connection Established")
         while True:
             if operation == "push":
                 if tftp_proc.has_pending_packets_to_be_sent() != 0:
                     # Acquire and the next TFTP packet to be sent
                     sen_packet = tftp_proc.get_next_output_packet()
+                    print("Packet Size = ", len(sen_packet))
                     udp_socket.sendto(sen_packet, (ip_address, new_port))
                     num_tries = 0
                     while num_tries < 4:
@@ -336,38 +351,46 @@ def main():
                         except timeout:
                             print("Request timed out!")
                             udp_socket.sendto(tftp_proc.get_reserve_packet(), (ip_address, new_port))
-                    reply = tftp_proc.process_udp_packet(inc_packet)
+                    reply = tftp_proc.process_udp_packet(inc_packet, ip_address)
                     if reply != "ACK":
                         break
-            elif operation == "pull":
-                num_tries = 0
-                rec_packet = []
-                server = ''
-                while num_tries < 4:
-                    try:
-                        num_tries +=1
-                        rec_packet, server = udp_socket.recvfrom(516)
-                        break
-                    except timeout:
-                        print("Request timed out ... Trying again!")
-                if num_tries != 4:
-                    reply = tftp_proc.process_udp_packet(rec_packet, server)
-                    if reply == "DONE":
-                        tftp_proc.decode_dload_file()
-                        break
-                    elif reply == "ERROR":
-                        break
-                    elif reply == "DATA":
-                        pass
-                    block_num = tftp_proc.get_block_number(rec_packet)
-                    ack_packet = bytearray()
-                    ack_packet.append(0)
-                    ack_packet.append(4)
-                    ack_packet += block_num
-                    udp_socket.sendto(ack_packet, (ip_address, new_port))
                 else:
-                    print("Failed to receive packet due to timeout. Please try again later!")
                     break
+    if operation == "pull":
+        while True:
+            num_tries = 0
+            rec_packet = []
+            server = ''
+            ass_port = ''
+            # Try receiving a packet from the server
+            # If after 4 timeouts it doesn't work, terminate the program
+            while num_tries < 4:
+                try:
+                    num_tries += 1
+                    rec_packet, (server, ass_port) = udp_socket.recvfrom(516)
+                    print("Received Packet size: ", len(rec_packet))
+                    break
+                except timeout:
+                    print("Request timed out ... Trying again!")
+            if num_tries != 4:
+                reply = tftp_proc.process_udp_packet(rec_packet, server)
+                if reply == "DONE":
+                    tftp_proc.decode_dload_file()
+                    print("Download Complete ...")
+                    exit(0)
+                elif reply == "ERROR":
+                    break
+                elif reply == "DATA":
+                    pass
+                block_num = tftp_proc.get_block_number(rec_packet)
+                ack_packet = bytearray()
+                ack_packet.append(0)
+                ack_packet.append(4)
+                ack_packet += block_num
+                udp_socket.sendto(ack_packet, (ip_address, ass_port))
+            else:
+                print("Failed to receive packet due to timeout. Please try again later!")
+                exit(12)
 
 
 if __name__ == "__main__":
